@@ -74,6 +74,7 @@
 
     <div class="actions">
       <button type="submit" id="search-btn">검색</button>
+      <button type="button" id="check-btn" class="secondary">토큰 확인</button>
       <button type="button" id="stop-btn" class="secondary hidden">중단</button>
       <button type="button" id="download-btn" class="secondary" disabled>CSV로 다운로드</button>
     </div>
@@ -161,6 +162,44 @@ function highlight(snippet, keyword) {
   const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
   return safe.replace(re, m => `<mark>${m}</mark>`);
 }
+
+// ---------------------------------------------------------------------------
+// 토큰 형식 검사 — 붙여넣기 중 섞인 공백·보이지 않는 문자·한글 등을 찾아낸다
+// 정상: ghp_ + 영문숫자 36자 (classic) 또는 github_pat_ + 영문숫자_ (fine-grained)
+// ---------------------------------------------------------------------------
+function validateToken(raw) {
+  const t = raw.trim();
+  if (!t) return { ok: false, msg: '토큰이 비어 있습니다.' };
+  // 헤더에 넣을 수 있는 문자는 영문·숫자·_ 뿐. 그 외 문자를 전부 찾는다.
+  const bad = [];
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (!/[A-Za-z0-9_]/.test(c)) bad.push(`${i + 1}번째 "${c === ' ' ? '공백' : c}" (U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')})`);
+  }
+  if (bad.length) return { ok: false, msg: `토큰에 허용되지 않은 문자가 있습니다: ${bad.slice(0, 5).join(', ')}${bad.length > 5 ? ' 외 ' + (bad.length - 5) + '개' : ''}. 토큰 칸을 비우고 다시 붙여넣어 주세요.` };
+  if (!/^(ghp_|github_pat_|gho_|ghu_|ghs_)/.test(t)) return { ok: false, msg: `토큰은 보통 ghp_ 로 시작합니다. 지금 값은 "${t.slice(0, 4)}…" 로 시작하고 길이는 ${t.length}자입니다. 전체가 복사됐는지 확인해 주세요.` };
+  if (t.startsWith('ghp_') && t.length !== 40) return { ok: false, msg: `classic 토큰은 40자인데 지금 값은 ${t.length}자입니다. 일부만 복사됐거나 뭔가 더 붙었습니다.` };
+  return { ok: true, token: t };
+}
+
+// "토큰 확인" 버튼: 검색 대신 가벼운 /rate_limit 호출로 토큰이 통하는지만 본다
+$('check-btn').addEventListener('click', async () => {
+  const v = validateToken(tokenInput.value);
+  if (!v.ok) { showStatus(v.msg, 'error'); return; }
+  showStatus('토큰 확인 중…', 'info');
+  try {
+    const resp = await fetch('https://api.github.com/rate_limit', {
+      headers: { 'Authorization': `Bearer ${v.token}`, 'X-GitHub-Api-Version': '2022-11-28' },
+    });
+    if (resp.status === 401) { showStatus('토큰이 유효하지 않습니다(401). 만료됐거나 잘못 복사됐습니다. GitHub에서 새로 발급해 주세요.', 'error'); return; }
+    if (!resp.ok) { showStatus(`GitHub 응답 ${resp.status}`, 'error'); return; }
+    const d = await resp.json();
+    const cs = d.resources?.code_search;
+    showStatus(`토큰 정상. 코드 검색 한도: 분당 ${cs?.limit ?? '?'}회, 남은 횟수 ${cs?.remaining ?? '?'}회.`, 'info');
+  } catch (e) {
+    showStatus(`네트워크 오류: ${e.message} — 토큰 형식은 정상인데 요청이 막혔습니다. Safari라면 콘텐츠 차단기를 끄거나 Chrome으로 열어 보세요.`, 'error');
+  }
+});
 
 // ---------------------------------------------------------------------------
 // GitHub API 호출 (한 페이지) — 403/429 시 대기 후 재시도
@@ -272,8 +311,15 @@ function renderRows(rows, keyword) {
 form.addEventListener('submit', async e => {
   e.preventDefault();
   const keyword = $('keyword').value;
-  const token = tokenInput.value.trim();
   const query = buildQuery(keyword, $('language').value, $('extension').value);
+
+  // 토큰이 입력돼 있으면 형식부터 검사 (잘못된 문자가 있으면 Safari는 "Load failed"만 보여줌)
+  let token = '';
+  if (tokenInput.value.trim()) {
+    const v = validateToken(tokenInput.value);
+    if (!v.ok) { showStatus(v.msg, 'error'); return; }
+    token = v.token;
+  }
 
   abortFlag = false;
   collectedRows = [];
