@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Code Search → CSV</title>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #fff; --text: #1f2328; --muted: #656d76; --border: #d0d7de;
+      --accent: #1f6feb; --accent-hover: #1a5fd0;
+      --warn-bg: #fff8c5; --warn-border: #d4a72c; --error-bg: #ffebe9; --error-border: #ff8182;
+      --info-bg: #ddf4ff; --info-border: #54aeff; --mark: #fff2a8;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 20px 14px 60px; }
+    h1 { margin: 0 0 4px; font-size: 1.4rem; }
+    .sub { margin: 0 0 16px; color: var(--muted); font-size: 0.9rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    label { display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; font-weight: 600; }
+    .req { color: #cf222e; }
+    input { padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 16px; font-weight: 400; width: 100%; }
+    input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+    button { padding: 10px 18px; border-radius: 6px; border: 1px solid transparent; background: var(--accent); color: #fff; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #fff; color: var(--text); border-color: var(--border); }
+    .warn, .status { margin: 12px 0 0; padding: 10px 12px; border-radius: 6px; border: 1px solid; font-size: 0.88rem; }
+    .warn, .status.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+    .status.error { background: var(--error-bg); border-color: var(--error-border); }
+    .status.info { background: var(--info-bg); border-color: var(--info-border); }
+    .summary { margin: 14px 0 8px; color: var(--muted); font-size: 0.9rem; }
+    .summary code { background: #eef1f4; padding: 2px 6px; border-radius: 4px; }
+    .hidden { display: none !important; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); font-size: 0.85rem; }
+    th, td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }
+    th { background: #f6f8fa; font-weight: 600; }
+    td.path { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+    td.links { white-space: nowrap; }
+    .snippet { margin: 0; max-width: 420px; max-height: 150px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; word-break: break-all; background: #f6f8fa; padding: 6px 8px; border-radius: 4px; }
+    mark { background: var(--mark); padding: 0 2px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<main class="container">
+  <h1>GitHub Code Search → CSV</h1>
+  <p class="sub">서버 없이 브라우저에서 직접 GitHub API를 호출합니다. 토큰은 GitHub 외에는 어디에도 전송되지 않습니다.</p>
+
+  <form id="search-form" class="card">
+    <div class="grid">
+      <label>검색어 <span class="req">*</span>
+        <input type="text" id="keyword" placeholder='예: "db_password"' required>
+      </label>
+      <label>언어 (선택)
+        <input type="text" id="language" placeholder="예: python, javascript">
+      </label>
+      <label>파일 확장자 (선택)
+        <input type="text" id="extension" placeholder="예: .py, .env">
+      </label>
+      <label>GitHub Personal Access Token
+        <input type="password" id="token" autocomplete="off" placeholder="ghp_... (Code Search는 토큰 필수)">
+      </label>
+    </div>
+
+    <p id="token-warning" class="warn">
+      ⚠ 토큰이 없으면 GitHub Code Search API를 호출할 수 없습니다 (401).
+      토큰이 있어도 코드 검색은 <strong>분당 10회</strong>로 제한되어 1,000건 수집에 약 1분이 걸립니다.
+    </p>
+
+    <div class="actions">
+      <button type="submit" id="search-btn">검색</button>
+      <button type="button" id="stop-btn" class="secondary hidden">중단</button>
+      <button type="button" id="download-btn" class="secondary" disabled>CSV로 다운로드</button>
+    </div>
+  </form>
+
+  <div id="status" class="status hidden"></div>
+  <div id="summary" class="summary hidden"></div>
+
+  <div class="table-wrap">
+    <table id="results" class="hidden">
+      <thead><tr><th>#</th><th>저장소</th><th>파일 경로</th><th>코드 스니펫</th><th>링크</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// 설정
+// ---------------------------------------------------------------------------
+const GITHUB_API = 'https://api.github.com/search/code';
+const PER_PAGE = 100;          // 한 페이지 최대치
+const MAX_PAGES = 10;          // 100 × 10 = 1,000건 상한 (GitHub 검색 API 한계)
+const REQUEST_DELAY_MS = 6500; // 코드 검색 rate limit: 인증 시 분당 10회 → 6.5초 간격
+const MAX_RETRIES = 3;
+
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+const form = $('search-form'), tokenInput = $('token'), tokenWarn = $('token-warning');
+const searchBtn = $('search-btn'), stopBtn = $('stop-btn'), downloadBtn = $('download-btn');
+const statusEl = $('status'), summaryEl = $('summary');
+const table = $('results'), tbody = table.querySelector('tbody');
+
+let collectedRows = [];   // 수집된 결과 (CSV 생성에 사용)
+let abortFlag = false;    // 중단 버튼
+
+tokenInput.addEventListener('input', () => {
+  tokenWarn.classList.toggle('hidden', tokenInput.value.trim() !== '');
+});
+
+// ---------------------------------------------------------------------------
+// 유틸
+// ---------------------------------------------------------------------------
+function showStatus(msg, type = 'info') { statusEl.textContent = msg; statusEl.className = `status ${type}`; }
+function hideStatus() { statusEl.className = 'status hidden'; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// HTML 이스케이프 — 스니펫에 <script> 같은 게 들어와도 실행되지 않게
+function esc(s) {
+  return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+}
+
+// 검색어 + 필터 → GitHub 쿼리. 예: name language:python extension:env
+function buildQuery(keyword, language, extension) {
+  const parts = [keyword.trim()];
+  if (language.trim()) parts.push(`language:${language.trim()}`);
+  if (extension.trim()) parts.push(`extension:${extension.trim().replace(/^\./, '')}`);
+  return parts.join(' ');
+}
+
+// text_matches → 스니펫 문자열
+function extractSnippet(item) {
+  return (item.text_matches || []).map(m => (m.fragment || '').trim()).filter(Boolean).join('\n---\n');
+}
+
+// 403/429 응답에서 대기 시간(초) 계산: Retry-After → X-RateLimit-Reset → 기본 60초
+function waitSecondsFrom(resp) {
+  const ra = resp.headers.get('Retry-After');
+  if (ra && /^\d+$/.test(ra)) return parseInt(ra, 10);
+  const reset = resp.headers.get('X-RateLimit-Reset');
+  if (reset && /^\d+$/.test(reset)) {
+    const remain = parseInt(reset, 10) - Math.floor(Date.now() / 1000);
+    if (remain > 0) return remain + 1;
+  }
+  return 60;
+}
+
+// 스니펫 하이라이트
+function highlight(snippet, keyword) {
+  const safe = esc(snippet);
+  const kw = keyword.replace(/^"|"$/g, '');
+  if (!kw) return safe;
+  const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  return safe.replace(re, m => `<mark>${m}</mark>`);
+}
+
+// ---------------------------------------------------------------------------
+// GitHub API 호출 (한 페이지) — 403/429 시 대기 후 재시도
+// ---------------------------------------------------------------------------
+async function fetchPage(query, page, token) {
+  const url = `${GITHUB_API}?q=${encodeURIComponent(query)}&per_page=${PER_PAGE}&page=${page}`;
+  const headers = {
+    'Accept': 'application/vnd.github.text-match+json',   // 스니펫(text_matches) 받으려면 필수
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    let resp;
+    try {
+      resp = await fetch(url, { headers });
+    } catch (e) {
+      throw new Error(`네트워크 오류: ${e.message}`);
+    }
+
+    if (resp.ok) return resp.json();
+
+    if (resp.status === 401) {
+      throw new Error('인증 실패(401). Code Search API는 토큰이 반드시 필요합니다. 유효한 토큰을 입력해 주세요.');
+    }
+    if (resp.status === 422) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(`검색 쿼리를 처리할 수 없습니다(422). ${body.message || ''}`);
+    }
+    if (resp.status === 403 || resp.status === 429) {
+      const wait = waitSecondsFrom(resp);
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`rate limit 초과(${resp.status}). ${MAX_RETRIES}회 재시도했지만 계속 제한됨. 약 ${wait}초 후 다시 시도해 주세요.`);
+      }
+      // 대기 중 카운트다운 표시
+      for (let s = wait; s > 0; s--) {
+        if (abortFlag) throw new Error('사용자가 중단했습니다.');
+        showStatus(`rate limit(${resp.status}) — ${s}초 대기 후 재시도 (${attempt}/${MAX_RETRIES})`, 'warn');
+        await sleep(1000);
+      }
+      continue;
+    }
+    throw new Error(`GitHub API 오류 ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 전체 수집 (페이지네이션 + 지연)
+// ---------------------------------------------------------------------------
+async function searchAll(query, token, onProgress) {
+  const rows = [];
+  let totalCount = 0;
+
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    if (abortFlag) break;
+    onProgress(`페이지 ${page}/${MAX_PAGES} 요청 중… (${rows.length}건 수집)`);
+
+    const data = await fetchPage(query, page, token);
+    totalCount = data.total_count ?? totalCount;
+    const items = data.items || [];
+
+    for (const item of items) {
+      const repo = item.repository || {};
+      rows.push({
+        repository: repo.full_name || '',
+        file_path: item.path || '',
+        snippet: extractSnippet(item),
+        file_url: item.html_url || '',
+        repo_url: repo.html_url || '',
+      });
+    }
+
+    // 마지막 페이지이거나 전부 모았으면 종료
+    if (items.length < PER_PAGE || rows.length >= Math.min(totalCount, PER_PAGE * MAX_PAGES)) break;
+
+    // 다음 요청 전 지연 (카운트다운)
+    for (let ms = REQUEST_DELAY_MS; ms > 0; ms -= 1000) {
+      if (abortFlag) break;
+      onProgress(`rate limit 준수 — ${Math.ceil(ms / 1000)}초 후 다음 페이지 (${rows.length}건 수집)`);
+      await sleep(Math.min(1000, ms));
+    }
+  }
+  return { rows, totalCount };
+}
+
+// ---------------------------------------------------------------------------
+// 렌더링
+// ---------------------------------------------------------------------------
+function renderRows(rows, keyword) {
+  tbody.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i + 1}</td>
+      <td><a href="${esc(r.repo_url)}" target="_blank" rel="noopener">${esc(r.repository)}</a></td>
+      <td class="path">${esc(r.file_path)}</td>
+      <td><pre class="snippet">${highlight(r.snippet, keyword)}</pre></td>
+      <td class="links"><a href="${esc(r.file_url)}" target="_blank" rel="noopener">파일</a> · <a href="${esc(r.repo_url)}" target="_blank" rel="noopener">저장소</a></td>`;
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
+  table.classList.remove('hidden');
+}
+
+// ---------------------------------------------------------------------------
+// 검색 실행
+// ---------------------------------------------------------------------------
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const keyword = $('keyword').value;
+  const token = tokenInput.value.trim();
+  const query = buildQuery(keyword, $('language').value, $('extension').value);
+
+  abortFlag = false;
+  collectedRows = [];
+  searchBtn.disabled = true; downloadBtn.disabled = true;
+  stopBtn.classList.remove('hidden');
+  table.classList.add('hidden'); summaryEl.classList.add('hidden');
+
+  try {
+    const { rows, totalCount } = await searchAll(query, token, msg => showStatus(msg, 'info'));
+    collectedRows = rows;
+    renderRows(rows, keyword);
+    summaryEl.innerHTML =
+      `쿼리 <code>${esc(query)}</code> · GitHub 전체 결과 <strong>${totalCount.toLocaleString()}</strong>건 중 ` +
+      `<strong>${rows.length.toLocaleString()}</strong>건 수집` +
+      (totalCount > rows.length ? ' (API 상한 1,000건)' : '') +
+      (abortFlag ? ' — 중단됨' : '');
+    summaryEl.classList.remove('hidden');
+    hideStatus();
+    downloadBtn.disabled = rows.length === 0;
+  } catch (err) {
+    showStatus(`오류: ${err.message} (쿼리: ${query})`, 'error');
+  } finally {
+    searchBtn.disabled = false;
+    stopBtn.classList.add('hidden');
+  }
+});
+
+stopBtn.addEventListener('click', () => { abortFlag = true; });
+
+// ---------------------------------------------------------------------------
+// CSV 생성 + 다운로드 (브라우저에서 직접)
+// ---------------------------------------------------------------------------
+function csvCell(v) {
+  const s = String(v ?? '');
+  // 쉼표·따옴표·줄바꿈이 있으면 따옴표로 감싸고 내부 따옴표는 두 번
+  return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+downloadBtn.addEventListener('click', () => {
+  if (!collectedRows.length) return;
+  const header = ['repository', 'file_path', 'snippet', 'file_url', 'repo_url'];
+  const lines = [header.join(',')];
+  for (const r of collectedRows) {
+    lines.push(header.map(h => csvCell(r[h])).join(','));
+  }
+  // ﻿ = UTF-8 BOM → Excel에서 한글 안 깨짐
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `github_code_search_${stamp}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>
