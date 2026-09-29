@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitHub Code Search → CSV</title>
+  <!-- 버전: 배포할 때마다 아래 APP_VERSION 과 CHANGELOG.md 를 함께 올린다 -->
   <style>
     :root {
       --bg: #f6f7f9; --card: #fff; --text: #1f2328; --muted: #656d76; --border: #d0d7de;
@@ -19,6 +20,8 @@
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 0.9rem; font-weight: 600; }
+    label.check { flex-direction: row; align-items: center; gap: 8px; font-weight: 400; }
+    label.check input { width: auto; }
     .req { color: #cf222e; }
     input { padding: 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 16px; font-weight: 400; width: 100%; }
     input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -44,6 +47,7 @@
     mark { background: var(--mark); padding: 0 2px; }
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
+    footer { margin-top: 32px; color: var(--muted); font-size: 0.8rem; text-align: center; }
   </style>
 </head>
 <body>
@@ -54,7 +58,11 @@
   <form id="search-form" class="card">
     <div class="grid">
       <label>검색어 <span class="req">*</span>
-        <input type="text" id="keyword" placeholder='예: "db_password"' required>
+        <input type="text" id="keyword" placeholder='예: "db_password"' autocorrect="off" autocapitalize="off" spellcheck="false" required>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="exact" checked>
+        정확히 일치 (따옴표 자동 추가)
       </label>
       <label>언어 (선택)
         <input type="text" id="language" placeholder="예: python, javascript">
@@ -89,12 +97,15 @@
       <tbody></tbody>
     </table>
   </div>
+
+  <footer>GitHub Code Search → CSV <span id="version"></span> · <a href="https://github.com/HamSeojin/github-search/blob/main/CHANGELOG.md" target="_blank" rel="noopener">변경 이력</a></footer>
 </main>
 
 <script>
 // ---------------------------------------------------------------------------
 // 설정
 // ---------------------------------------------------------------------------
+const APP_VERSION = '1.4.0';   // 배포 시 갱신 (CHANGELOG.md 와 맞출 것)
 const GITHUB_API = 'https://api.github.com/search/code';
 const PER_PAGE = 100;          // 한 페이지 최대치
 const MAX_PAGES = 10;          // 100 × 10 = 1,000건 상한 (GitHub 검색 API 한계)
@@ -110,7 +121,10 @@ const searchBtn = $('search-btn'), stopBtn = $('stop-btn'), downloadBtn = $('dow
 const statusEl = $('status'), summaryEl = $('summary');
 const table = $('results'), tbody = table.querySelector('tbody');
 
+document.getElementById('version').textContent = 'v' + APP_VERSION;
+
 let collectedRows = [];   // 수집된 결과 (CSV 생성에 사용)
+let lastTotalCount = 0;   // 마지막으로 받은 total_count (중간 실패 시 요약에 사용)
 let abortFlag = false;    // 중단 버튼
 
 tokenInput.addEventListener('input', () => {
@@ -130,8 +144,21 @@ function esc(s) {
 }
 
 // 검색어 + 필터 → GitHub 쿼리. 예: name language:python extension:env
-function buildQuery(keyword, language, extension) {
-  const parts = [keyword.trim()];
+// iOS 등에서 자동 변환되는 스마트 따옴표(“ ” ‘ ’)를 GitHub가 인식하는 일반 따옴표로 되돌린다
+function normalizeQuotes(s) {
+  return s.replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'");
+}
+
+// 따옴표가 없으면 자동으로 감싼다 → 여러 단어를 정확한 문구로 검색
+function ensureQuoted(kw) {
+  if (!kw || kw.includes('"')) return kw;   // 이미 따옴표가 있으면 그대로
+  return `"${kw}"`;
+}
+
+function buildQuery(keyword, language, extension, exact = true) {
+  let kw = normalizeQuotes(keyword).trim();
+  if (exact) kw = ensureQuoted(kw);
+  const parts = [kw];
   if (language.trim()) parts.push(`language:${language.trim()}`);
   if (extension.trim()) parts.push(`extension:${extension.trim().replace(/^\./, '')}`);
   return parts.join(' ');
@@ -217,7 +244,14 @@ async function fetchPage(query, page, token) {
     try {
       resp = await fetch(url, { headers });
     } catch (e) {
-      throw new Error(`네트워크 오류: ${e.message}`);
+      // Safari "Load failed" 등 일시적 네트워크 오류 → 잠시 쉬고 재시도
+      if (attempt === MAX_RETRIES) throw new Error(`네트워크 오류: ${e.message}`);
+      for (let s = 5; s > 0; s--) {
+        if (abortFlag) throw new Error('사용자가 중단했습니다.');
+        showStatus(`네트워크 오류(${e.message}) — ${s}초 후 재시도 (${attempt}/${MAX_RETRIES})`, 'warn');
+        await sleep(1000);
+      }
+      continue;
     }
 
     if (resp.ok) return resp.json();
@@ -249,8 +283,8 @@ async function fetchPage(query, page, token) {
 // ---------------------------------------------------------------------------
 // 전체 수집 (페이지네이션 + 지연)
 // ---------------------------------------------------------------------------
-async function searchAll(query, token, onProgress) {
-  const rows = [];
+async function searchAll(query, token, onProgress, rows) {
+  // rows 는 호출한 쪽 배열을 그대로 채운다 → 중간에 오류가 나도 그때까지 모은 결과가 남는다
   let totalCount = 0;
 
   for (let page = 1; page <= MAX_PAGES; page++) {
@@ -259,6 +293,7 @@ async function searchAll(query, token, onProgress) {
 
     const data = await fetchPage(query, page, token);
     totalCount = data.total_count ?? totalCount;
+    lastTotalCount = totalCount;
     const items = data.items || [];
 
     for (const item of items) {
@@ -282,7 +317,7 @@ async function searchAll(query, token, onProgress) {
       await sleep(Math.min(1000, ms));
     }
   }
-  return { rows, totalCount };
+  return { totalCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +346,7 @@ function renderRows(rows, keyword) {
 form.addEventListener('submit', async e => {
   e.preventDefault();
   const keyword = $('keyword').value;
-  const query = buildQuery(keyword, $('language').value, $('extension').value);
+  const query = buildQuery(keyword, $('language').value, $('extension').value, $('exact').checked);
 
   // 토큰이 입력돼 있으면 형식부터 검사 (잘못된 문자가 있으면 Safari는 "Load failed"만 보여줌)
   let token = '';
@@ -327,20 +362,33 @@ form.addEventListener('submit', async e => {
   stopBtn.classList.remove('hidden');
   table.classList.add('hidden'); summaryEl.classList.add('hidden');
 
-  try {
-    const { rows, totalCount } = await searchAll(query, token, msg => showStatus(msg, 'info'));
-    collectedRows = rows;
-    renderRows(rows, keyword);
+  const rows = [];
+  collectedRows = rows;   // 실패해도 여기까지 모은 게 CSV 대상이 된다
+
+  function showSummary(totalCount, note) {
     summaryEl.innerHTML =
       `쿼리 <code>${esc(query)}</code> · GitHub 전체 결과 <strong>${totalCount.toLocaleString()}</strong>건 중 ` +
       `<strong>${rows.length.toLocaleString()}</strong>건 수집` +
-      (totalCount > rows.length ? ' (API 상한 1,000건)' : '') +
-      (abortFlag ? ' — 중단됨' : '');
+      (totalCount > rows.length ? ' (API 상한 1,000건)' : '') + note;
     summaryEl.classList.remove('hidden');
+  }
+
+  try {
+    const { totalCount } = await searchAll(query, token, msg => showStatus(msg, 'info'), rows);
+    renderRows(rows, normalizeQuotes(keyword));
+    showSummary(totalCount, abortFlag ? ' — 중단됨' : '');
     hideStatus();
     downloadBtn.disabled = rows.length === 0;
   } catch (err) {
-    showStatus(`오류: ${err.message} (쿼리: ${query})`, 'error');
+    if (rows.length > 0) {
+      // 부분 결과라도 보여주고 CSV 저장 가능하게
+      renderRows(rows, normalizeQuotes(keyword));
+      showSummary(lastTotalCount, ' — <strong>중간에 오류</strong>, 여기까지 저장 가능');
+      downloadBtn.disabled = false;
+      showStatus(`오류: ${err.message} — ${rows.length}건은 수집됐으니 CSV로 저장할 수 있습니다.`, 'error');
+    } else {
+      showStatus(`오류: ${err.message} (쿼리: ${query})`, 'error');
+    }
   } finally {
     searchBtn.disabled = false;
     stopBtn.classList.add('hidden');
